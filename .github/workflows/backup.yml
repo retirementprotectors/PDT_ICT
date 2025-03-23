@@ -1,0 +1,127 @@
+name: Automated Backup
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Run every 6 hours
+  workflow_dispatch:  # Allow manual trigger
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch all history
+
+      - name: Set up Git
+        run: |
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
+
+      - name: Get branch info
+        id: branch
+        run: |
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+          echo "current_branch=${CURRENT_BRANCH}" >> $GITHUB_OUTPUT
+          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "backup_branch=backup/${CURRENT_BRANCH}/${TIMESTAMP}" >> $GITHUB_OUTPUT
+
+      - name: Create backup branch
+        run: |
+          git checkout -b ${{ steps.branch.outputs.backup_branch }}
+          git push origin ${{ steps.branch.outputs.backup_branch }}
+
+      - name: Clean large files
+        run: |
+          # Remove any tracked large files from Git history
+          git filter-branch --force --index-filter \
+            'git rm --cached --ignore-unmatch **/*.tar.gz **/*.zip' \
+            --prune-empty --tag-name-filter cat -- --all
+
+      - name: Create backup archive
+        run: |
+          # Include branch information in backup
+          BRANCH_INFO="Branch: ${{ steps.branch.outputs.current_branch }}"
+          echo $BRANCH_INFO > branch_info.txt
+          
+          # Exclude large files and sensitive data
+          tar --exclude='.git' \
+              --exclude='*.tar.gz' \
+              --exclude='*.zip' \
+              --exclude='node_modules' \
+              --exclude='.env' \
+              -czf "../backup_${{ steps.branch.outputs.current_branch }}_${{ steps.branch.outputs.timestamp }}.tar.gz" .
+
+      - name: Upload backup as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: codebase-backup-${{ steps.branch.outputs.current_branch }}
+          path: ../backup_*.tar.gz
+          retention-days: 30
+
+      - name: Clean up old backups
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const artifacts = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            
+            // Group backups by branch
+            const backupsByBranch = artifacts.data.artifacts
+              .filter(artifact => artifact.name.startsWith('codebase-backup-'))
+              .reduce((acc, artifact) => {
+                const branch = artifact.name.split('-').pop();
+                if (!acc[branch]) acc[branch] = [];
+                acc[branch].push(artifact);
+                return acc;
+              }, {});
+            
+            // Keep last 5 backups per branch
+            for (const [branch, backups] of Object.entries(backupsByBranch)) {
+              const oldBackups = backups
+                .sort((a, b) => b.created_at - a.created_at)
+                .slice(5);
+              
+              for (const backup of oldBackups) {
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: backup.id,
+                });
+              }
+            }
+
+      - name: Clean up old backup branches
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { data: branches } = await github.rest.repos.listBranches({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            
+            const backupBranches = branches
+              .filter(branch => branch.name.startsWith('backup/'))
+              .sort((a, b) => {
+                const timestampA = a.name.split('/').pop();
+                const timestampB = b.name.split('/').pop();
+                return timestampB.localeCompare(timestampA);
+              })
+              .slice(10); // Keep last 10 backup branches per main branch
+            
+            for (const branch of backupBranches) {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `heads/${branch.name}`,
+              });
+            } 
