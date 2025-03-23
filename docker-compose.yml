@@ -1,0 +1,53 @@
+services:
+  frontend:
+    build:
+      context: .
+      target: frontend
+    ports:
+      - "${FRONTEND_PORT:-51072}:3000"
+    environment:
+      - VITE_API_URL=http://localhost:${BACKEND_PORT:-52072}
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: .
+      target: backend
+    ports:
+      - "${BACKEND_PORT:-52072}:3001"
+    environment:
+      - NODE_ENV=development
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=pdt_ict_072
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - JWT_SECRET=dev_jwt_secret_072
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "${DB_PORT:-53072}:5432"
+    environment:
+      - POSTGRES_DB=pdt_ict_072
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./src/server/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+
+networks:
+  pdt_network:
+    name: pdt_network_${FRONTEND_PORT:-51072}  # Dynamic network name based on port 
